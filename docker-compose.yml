@@ -22,9 +22,12 @@ services:
       TA_USERNAME: ${WONTON_SECRET_TA_USER}
       TA_PASSWORD: ${WONTON_SECRET_TA_PASSWORD}
       TA_ENABLE_AUTH_PROXY: "true"
-      # 网关注入的请求头在 Django 里是 META 键 HTTP_REMOTE_USER，即 Remote-User 头；
-      # 值是 secrets.ta_user，不是用户名（见文件头）。
-      TA_AUTH_PROXY_USERNAME_HEADER: HTTP_REMOTE_USER
+      # TA_AUTH_PROXY_USERNAME_HEADER 是 Django 6 里的一个坑：TA 跑在 uvicorn/ASGI 上，
+      # 认头走 RemoteUserMiddleware.aprocess_request，它读 META["HTTP_" + 自身值]（同步
+      # 路径读 META[自身值]，两条路径约定不同，见 django/contrib/auth/middleware.py 6.0.9）。
+      # 网关注入的 Remote-User 头在 META 里是 HTTP_REMOTE_USER，所以这里必须写 REMOTE_USER；
+      # 写上游默认的 HTTP_REMOTE_USER 会变成找 HTTP_HTTP_REMOTE_USER，静默不认证。
+      TA_AUTH_PROXY_USERNAME_HEADER: REMOTE_USER
       ELASTIC_PASSWORD: ${WONTON_SECRET_ELASTIC_PASSWORD}
       ES_URL: http://es:9200
       REDIS_CON: redis://:${WONTON_SECRET_REDIS_PASSWORD}@redis:6379
