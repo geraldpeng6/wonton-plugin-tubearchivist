@@ -11,7 +11,8 @@ web_assert() { grep -qi 'tubearchivist'; }   # 标准输入：应用真实页面
 
 _tb_prep() {  # 建立应用会话：jar 里要有应用种的 csrftoken
   [[ -n "${SMOKE_JAR:-}" ]] || { echo "SMOKE_JAR 没设置"; return 1; }
-  dweb --sso / >/dev/null || { echo "走不通网关代登录链"; return 1; }
+  local log
+  log="$(dweb --sso / 2>&1 >/dev/null)" || { echo "走不通网关代登录链：${log:-（无输出）}"; return 1; }
   grep -q csrftoken "$SMOKE_JAR" ||
     { echo "应用会话没建立（jar 里没有 csrftoken，代登录头没生效？）"; return 1; }
 }
