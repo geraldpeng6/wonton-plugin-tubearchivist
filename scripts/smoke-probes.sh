@@ -3,108 +3,55 @@
 # 自动建会话，见 docker-compose.yml 文件头）；清单没有 mcp。
 #
 # 数据探针用应用自己的设置接口写一条配置（存进 Elasticsearch），升级和重装后读回来对得上。
-# 探针自建会话：先登核心（token），再打开应用页面——代登录头在首个请求上让应用登录并种下
-# csrftoken，之后的写请求带上它（Django SessionAuthentication 要 CSRF）。
-
-TB_ID="com.tubearchivist.app"
+# 会话由套件助手建立：dweb --sso 走完整交接链（核心令牌登录 → 网关自动表单 → 应用），
+# jar 里带上 wonton_app 和应用种的 sessionid、csrftoken（Django SessionAuthentication
+# 的写请求要 CSRF）。探针只用套件保证的 SMOKE_* 变量和 web_get/dweb 助手。
 
 web_assert() { grep -qi 'tubearchivist'; }   # 标准输入：应用真实页面（SPA 的 index.html）
 
-# 套件探针（SMOKE_*）和 e2e（E2E_*）两套变量名都兜住，字段取值见各套件。
-_tb_env() {
-  _TB_JAR="${E2E_JAR:-$SMOKE_JAR}"
-  _TB_BASE="${E2E_BASE:-$SMOKE_BASE}"
-  _TB_TOKEN="${E2E_TOKEN:-$SMOKE_TOKEN}"
-  _TB_WEB_URL="${E2E_WEB_URL:-$SMOKE_WEB_URL}"
+_tb_prep() {  # 建立应用会话：jar 里要有应用种的 csrftoken
+  [[ -n "${SMOKE_JAR:-}" ]] || { echo "SMOKE_JAR 没设置"; return 1; }
+  dweb --sso / >/dev/null || { echo "走不通网关代登录链"; return 1; }
+  grep -q csrftoken "$SMOKE_JAR" ||
+    { echo "应用会话没建立（jar 里没有 csrftoken，代登录头没生效？）"; return 1; }
 }
 
-_tb_state_file() {  # 套件给的是文件，e2e 给的是文件，dev.sh probes 给的是状态目录
-  if [[ -d "${SMOKE_STATE:-}" ]]; then
-    printf '%s/tubearchivist.probe' "$SMOKE_STATE"
-  else
-    printf '%s' "${SMOKE_STATE:-}"
-  fi
-}
-
-_tb_prep() {  # 备好 _TB_JAR/_TB_URL，建立核心会话和应用会话（jar 里带上 csrftoken）
-  _tb_env
-  [[ -n "$_TB_JAR" && -n "$_TB_BASE" && -n "$_TB_TOKEN" ]] ||
-    { echo "探针环境变量不齐：jar/base/token 至少缺一"; return 1; }
-  if [[ -z "$_TB_WEB_URL" ]]; then
-    local plugins
-    plugins="$(curl -sS --noproxy '*' --fail-with-body -H "Authorization: Bearer $_TB_TOKEN" "$_TB_BASE/_wonton/api/plugins")" ||
-      { echo "列不出插件，拿不到网页地址"; return 1; }
-    _TB_WEB_URL="$(jq -rn --arg id "$TB_ID" --arg json "$plugins" \
-      '$json | fromjson | .plugins[] | select(.id==$id) | .web_url // ""')" ||
-      { echo "解析网页地址失败"; return 1; }
-    [[ -n "$_TB_WEB_URL" ]] || { echo "插件没有网页地址"; return 1; }
-  fi
-  _TB_URL="$(sed -E 's#^(https?://[^/]+).*#\1#' <<<"$_TB_WEB_URL")"
-  # 核心会话：令牌登不进时后面全部失败，如实报错。
-  local code
-  code="$(curl -sS --noproxy '*' -o /dev/null -w '%{http_code}' -c "$_TB_JAR" -b "$_TB_JAR" \
-    --data-urlencode "token=$_TB_TOKEN" "$_TB_BASE/_wonton/login")" ||
-    { echo "核心登录请求失败"; return 1; }
-  [[ "$code" == 2* || "$code" == 30* ]] || { echo "核心令牌登录不了（HTTP $code）"; return 1; }
-  # 打开应用页面：网关代登录头在首个请求上让应用登录，响应种下 sessionid 和 csrftoken。
-  # 跟随完整交接链（核心登录 → /_wonton/session 交接 → 应用），保留现场：失败时打印响应码、
-  # 页面开头和 jar 里的 cookie 名，方便定位是会话、交接还是应用没接上。
-  local page
-  page="$(mktemp)"
-  curl -sS --noproxy '*' -o "$page" -w '%{http_code}' -L -b "$_TB_JAR" -c "$_TB_JAR" \
-    -H 'Accept: text/html' "$_TB_URL/" >"$page.code" 2>/dev/null || true
-  code="$(cat "$page.code" 2>/dev/null || echo '?')"
-  grep -q csrftoken "$_TB_JAR" || {
-    local ping ping_body chain verbose jar_head
-    ping="$(curl -sS --noproxy '*' -o /dev/null -w '%{http_code}' -b "$_TB_JAR" "$_TB_URL/api/ping/" 2>&1 || echo '?')"
-    ping_body="$(curl -sS --noproxy '*' -b "$_TB_JAR" "$_TB_URL/api/ping/" 2>&1 | head -c 160 || true)"
-    verbose="$(curl -sS --noproxy '*' -o /dev/null -v -L -b "$_TB_JAR" -c "$_TB_JAR" -H 'Accept: text/html' "$_TB_URL/" 2>&1 | grep -iE '^[<>*]|set-cookie|location' | head -40 || true)"
-    chain="$(curl -sS --noproxy '*' -o /dev/null -L -b "$_TB_JAR" -c "$_TB_JAR" -H 'Accept: text/html' -w '%{num_redirects} 次：最后 %{url_effective}' "$_TB_URL/" 2>&1 || true)"
-    jar_head="$(grep -v '^#' "$_TB_JAR" 2>/dev/null | awk '{printf "%s ", $6}' || true)"
-    echo "应用会话没建立：页面 HTTP $code，ping $ping（$ping_body）；重定向 $chain；jar：${jar_head:-（空）}；响应头：
-$verbose"
-    rm -f "$page" "$page.code"
-    return 1
-  }
-  rm -f "$page" "$page.code"
-}
-
-_tb_csrf() { awk '$6 == "csrftoken" {print $7; exit}' "$_TB_JAR"; }
+_tb_csrf() { awk '$6 == "csrftoken" {print $7; exit}' "$SMOKE_JAR"; }
 
 identity_check() {  # /api/user/account/ 只回给已登录会话：200 且是管理员说明代登录头生效
   _tb_prep || return 1
   local out
-  out="$(curl -sS --noproxy '*' --fail-with-body -b "$_TB_JAR" "$_TB_URL/api/user/account/")" ||
+  out="$(web_get /api/user/account/)" ||
     { echo "GET /api/user/account/ 失败：$out"; return 1; }
   jq -e '.is_staff == true and .is_superuser == true' <<<"$out" >/dev/null ||
     { echo "应用认出的账号不是管理员：$out"; return 1; }
 }
 
 data_write() {
-  local state
-  state="$(_tb_state_file)" || { echo "SMOKE_STATE 没设置"; return 1; }
+  local state marker out tok
+  state="${SMOKE_STATE:-}"
+  [[ -n "$state" ]] || { echo "SMOKE_STATE 没设置"; return 1; }
   _tb_prep || return 1
-  local tok marker out
   tok="$(_tb_csrf)"
   [[ -n "$tok" ]] || { echo "会话里没有 csrftoken"; return 1; }
   marker="$(( (RANDOM % 41) + 60 ))"   # 订阅页大小 60-100，探测值
-  out="$(curl -sS --noproxy '*' --fail-with-body -b "$_TB_JAR" -c "$_TB_JAR" \
+  out="$(web_get /api/appsettings/config/ \
     -H 'Content-Type: application/json' -H "X-CSRFToken: $tok" \
-    -X POST -d "{\"subscriptions\":{\"channel_size\":$marker}}" \
-    "$_TB_URL/api/appsettings/config/")" ||
+    -X POST -d "{\"subscriptions\":{\"channel_size\":$marker}}")" ||
     { echo "POST /api/appsettings/config/ 失败：$out"; return 1; }
   printf 'channel_size\t%s\n' "$marker" >"$state" || { echo "写不进状态文件 $state"; return 1; }
   echo "已把订阅页大小写成 $marker（$state）"
 }
 
 data_check() {
-  local state line marker out got
-  state="$(_tb_state_file)" || { echo "SMOKE_STATE 没设置"; return 1; }
+  local state line marker out got tok
+  state="${SMOKE_STATE:-}"
+  [[ -n "$state" ]] || { echo "SMOKE_STATE 没设置"; return 1; }
   [[ -s "$state" ]] || { echo "状态文件 $state 不存在或为空：data_write 没跑过？"; return 1; }
   line="$(head -n 1 "$state")"
   marker="${line##*$'\t'}"
   _tb_prep || return 1
-  out="$(curl -sS --noproxy '*' --fail-with-body -b "$_TB_JAR" "$_TB_URL/api/appsettings/config/")" ||
+  out="$(web_get /api/appsettings/config/)" ||
     { echo "GET /api/appsettings/config/ 失败：$out"; return 1; }
   got="$(jq -r '.subscriptions.channel_size // empty' <<<"$out")"
   [[ "$got" == "$marker" ]] ||
