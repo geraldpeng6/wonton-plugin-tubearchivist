@@ -6,7 +6,7 @@
 # 探针自建会话：先登核心（token），再打开应用页面——代登录头在首个请求上让应用登录并种下
 # csrftoken，之后的写请求带上它（Django SessionAuthentication 要 CSRF）。
 
-TB_ID="com.tubearchivist.tubearchivist"
+TB_ID="com.tubearchivist.app"
 
 web_assert() { grep -qi 'tubearchivist'; }   # 标准输入：应用真实页面（SPA 的 index.html）
 
