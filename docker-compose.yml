@@ -13,8 +13,10 @@ services:
     # 上游支持以任意 uid 运行：下载的视频和缓存归用户，数据目录也按 PUID:PGID 交给它。
     user: "${PUID}:${PGID}"
     environment:
-      # 上游拿它生成 ALLOWED_HOSTS 和 CSRF_TRUSTED_ORIGINS，要按浏览器看到的地址写。
-      TA_HOST: ${WONTON_APP_URL}
+      # 上游拿它生成 ALLOWED_HOSTS 和 CSRF_TRUSTED_ORIGINS，要按浏览器看到的地址写；
+      # 再加上 127.0.0.1：核心安装时的网页探测和下面的健康检查都用它连，不给的话 Django 按
+      # DisallowedHost 回 400，健康检查永远过不了（上游 ta_host_parser 按空格拆多个地址）。
+      TA_HOST: "${WONTON_APP_URL} http://127.0.0.1:8000"
       # 应用强制要求 TA_USERNAME/TA_PASSWORD 并在启动时用它建管理员账号；两个值都是核心
       # 生成的密钥，不写死（见文件头：网页身份由代登录头决定，这对凭据不落人手）。
       TA_USERNAME: ${WONTON_SECRET_TA_USER}
@@ -38,11 +40,12 @@ services:
         condition: service_healthy
     healthcheck:
       # 应用进程应答之外，同一网络里还要连得上 ES（yellow）和 Redis：三个都通才算健康。
+      # curl 都加 --noproxy：健康检查不走代理（规范），出网代理的变量不影响内部探测。
       test:
         - CMD-SHELL
         - >-
-          curl -fsS http://127.0.0.1:8000/api/health/ >/dev/null
-          && curl -fsS -u "elastic:$$ELASTIC_PASSWORD" 'http://archivist-es:9200/_cluster/health?wait_for_status=yellow&timeout=10s' >/dev/null
+          curl --noproxy '*' -fsS http://127.0.0.1:8000/api/health/ >/dev/null
+          && curl --noproxy '*' -fsS -u "elastic:$$ELASTIC_PASSWORD" 'http://archivist-es:9200/_cluster/health?wait_for_status=yellow&timeout=10s' >/dev/null
           && python3 -c "import redis, os; redis.from_url(os.environ['REDIS_CON']).ping()"
       interval: 60s
       timeout: 15s
@@ -67,10 +70,11 @@ services:
       # 索引数据是派生数据；命名卷首次创建时沿用镜像里数据目录的属主，不依赖 PUID。
       - es-data:/usr/share/elasticsearch/data
     healthcheck:
+      # 健康检查不走代理，加 --noproxy。
       test:
         - CMD-SHELL
         - >-
-          curl -fsS -u "elastic:$$ELASTIC_PASSWORD"
+          curl --noproxy '*' -fsS -u "elastic:$$ELASTIC_PASSWORD"
           'http://127.0.0.1:9200/_cluster/health?wait_for_status=yellow&timeout=10s' >/dev/null
       interval: 30s
       timeout: 15s
