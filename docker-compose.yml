@@ -7,7 +7,7 @@
 # 应用启动时以它为用户名建管理员，网关对登录用户的每个请求都带上同名头，打开网页就是管理员，
 # 没有第二个登录页。拿到这个值才能进应用，它只存在核心密钥库和容器环境里。
 services:
-  tubearchivist:
+  app:
     # 上游官方镜像，标签对上游 v0.6.0（license: GPL-3.0-only）。
     image: bbilly1/tubearchivist:v0.6.0@sha256:0cbc18aa953c72ec7dfdd6f8fa7c2fe89b5d04489857d7baa354fecbd6181e69
     # 上游支持以任意 uid 运行：下载的视频和缓存归用户，数据目录也按 PUID:PGID 交给它。
@@ -26,17 +26,17 @@ services:
       # 值是 secrets.ta_user，不是用户名（见文件头）。
       TA_AUTH_PROXY_USERNAME_HEADER: HTTP_REMOTE_USER
       ELASTIC_PASSWORD: ${WONTON_SECRET_ELASTIC_PASSWORD}
-      ES_URL: http://archivist-es:9200
-      REDIS_CON: redis://:${WONTON_SECRET_REDIS_PASSWORD}@archivist-redis:6379
+      ES_URL: http://es:9200
+      REDIS_CON: redis://:${WONTON_SECRET_REDIS_PASSWORD}@redis:6379
       TZ: ${TZ}
     volumes:
       # 下载的视频（/youtube）和缩略图、下载队列缓存（/cache）放插件数据目录。
       - ${WONTON_APP_DATA}/media:/youtube
       - ${WONTON_APP_DATA}/cache:/cache
     depends_on:
-      archivist-es:
+      es:
         condition: service_healthy
-      archivist-redis:
+      redis:
         condition: service_healthy
     healthcheck:
       # 应用进程应答之外，同一网络里还要连得上 ES（yellow）和 Redis：三个都通才算健康。
@@ -45,7 +45,7 @@ services:
         - CMD-SHELL
         - >-
           curl --noproxy '*' -fsS http://127.0.0.1:8000/api/health/ >/dev/null
-          && curl --noproxy '*' -fsS -u "elastic:$$ELASTIC_PASSWORD" 'http://archivist-es:9200/_cluster/health?wait_for_status=yellow&timeout=10s' >/dev/null
+          && curl --noproxy '*' -fsS -u "elastic:$$ELASTIC_PASSWORD" 'http://es:9200/_cluster/health?wait_for_status=yellow&timeout=10s' >/dev/null
           && python3 -c "import redis, os; redis.from_url(os.environ['REDIS_CON']).ping()"
       interval: 60s
       timeout: 15s
@@ -54,7 +54,7 @@ services:
       start_period: 5m
       start_interval: 15s
 
-  archivist-es:
+  es:
     # Elasticsearch 官方镜像（Elastic License 2.0）。上游自己的 bbilly1/tubearchivist-es 只有
     # amd64，上游 docker-compose 注明 arm64 用官方 ES 9.5.5，这里两边都能跑。
     image: docker.elastic.co/elasticsearch/elasticsearch:9.5.5@sha256:13b4a40bb095774f5fda635e45fd5677cc6a26565e42b24997b0c72b88e75984
@@ -82,7 +82,7 @@ services:
       start_period: 2m
       start_interval: 5s
 
-  archivist-redis:
+  redis:
     # 上游 docker-compose 用官方 Redis 镜像（AGPLv3、RSALv2 或 SSPLv1，见 NOTICE）。
     image: redis:8.8.4@sha256:a008e2cb5579f3616b29bd9e9913a25f16ec09ae2f56ddab524664663b581228
     # 任务队列带密码：出网插件的网络上宿主进程连得到，不设防的 Redis 能被写入任务。
@@ -105,7 +105,7 @@ volumes:
 
 x-wonton:
   spec: "0.5"
-  id: com.tubearchivist.tubearchivist
+  id: com.tubearchivist.app
   version: 0.1.0
   kind: app
   title: { en: TubeArchivist }
@@ -139,7 +139,7 @@ x-wonton:
     zh: 第一版：频道订阅、自动下载、全文搜索和 Jellyfin 元数据输出。
     en: First release with channel subscriptions, automatic downloads, full-text search and Jellyfin metadata.
   webui:
-    service: tubearchivist
+    service: app
     port: 8000
     # 网关对登录用户代带 Remote-User 头，值是 secrets.ta_user（见文件头），打开就是管理员。
     sso: proxy
