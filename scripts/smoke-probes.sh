@@ -55,8 +55,11 @@ _tb_prep() {  # 备好 _TB_JAR/_TB_URL，建立核心会话和应用会话（jar
     -H 'Accept: text/html' "$_TB_URL/" >"$page.code" 2>/dev/null || true
   code="$(cat "$page.code" 2>/dev/null || echo '?')"
   grep -q csrftoken "$_TB_JAR" || {
-    diag="$(head -c 200 "$page" 2>/dev/null | tr '\n' ' ')"
-    echo "应用会话没建立（jar 里没有 csrftoken）：最后响应 HTTP $code，页面开头：${diag:-（空）}；jar cookie：$(grep -vc '^#' "$_TB_JAR" 2>/dev/null) 行：$(awk '!/^#/ {printf "%s ", $6}' "$_TB_JAR" 2>/dev/null)"
+    local ping chain jar_head
+    ping="$(curl -sS --noproxy '*' -o /dev/null -w '%{http_code}' -b "$_TB_JAR" "$_TB_URL/api/ping/" 2>&1 || echo '?')"
+    chain="$(curl -sS --noproxy '*' -o /dev/null -L -b "$_TB_JAR" -c "$_TB_JAR" -H 'Accept: text/html' -w '%{num_redirects} 次：最后 %{url_effective}' "$_TB_URL/" 2>&1 || true)"
+    jar_head="$(head -c 300 "$_TB_JAR" 2>/dev/null | tr '\n' '|')"
+    echo "应用会话没建立（jar 里没有 csrftoken）：页面 HTTP $code，/api/ping/ 返回 $ping；重定向 $chain；jar 开头：${jar_head:-（空）}"
     rm -f "$page" "$page.code"
     return 1
   }
