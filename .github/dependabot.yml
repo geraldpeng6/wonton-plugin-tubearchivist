@@ -5,3 +5,7 @@ updates:
     directory: /
     schedule:
       interval: daily
+    # Elasticsearch 跨大版本要重建索引或快照迁移，不让 Dependabot 自动开。
+    ignore:
+      - dependency-name: docker.elastic.co/elasticsearch/elasticsearch
+        update-types: ["version-update:semver-major"]
