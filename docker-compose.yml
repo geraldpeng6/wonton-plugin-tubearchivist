@@ -57,7 +57,7 @@ services:
   es:
     # Elasticsearch 官方镜像（Elastic License 2.0）。上游自己的 bbilly1/tubearchivist-es 只有
     # amd64，上游 docker-compose 注明 arm64 用官方 ES 9.5.5，这里两边都能跑。
-    image: docker.elastic.co/elasticsearch/elasticsearch:9.5.5@sha256:13b4a40bb095774f5fda635e45fd5677cc6a26565e42b24997b0c72b88e75984
+    image: docker.elastic.co/elasticsearch/elasticsearch:9.5.6@sha256:79b4f1de4c15e6eca824723086a51e5934406d614d410cc11be77748cafac537
     environment:
       # TubeArchivist 以 elastic 账号连进来，密码由核心生成保管，两边一致。
       ELASTIC_PASSWORD: ${WONTON_SECRET_ELASTIC_PASSWORD}
