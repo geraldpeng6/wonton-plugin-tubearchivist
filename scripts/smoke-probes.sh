@@ -49,17 +49,20 @@ _tb_prep() {  # 备好 _TB_JAR/_TB_URL，建立核心会话和应用会话（jar
   # 打开应用页面：网关代登录头在首个请求上让应用登录，响应种下 sessionid 和 csrftoken。
   # 跟随完整交接链（核心登录 → /_wonton/session 交接 → 应用），保留现场：失败时打印响应码、
   # 页面开头和 jar 里的 cookie 名，方便定位是会话、交接还是应用没接上。
-  local page diag
+  local page
   page="$(mktemp)"
   curl -sS --noproxy '*' -o "$page" -w '%{http_code}' -L -b "$_TB_JAR" -c "$_TB_JAR" \
     -H 'Accept: text/html' "$_TB_URL/" >"$page.code" 2>/dev/null || true
   code="$(cat "$page.code" 2>/dev/null || echo '?')"
   grep -q csrftoken "$_TB_JAR" || {
-    local ping chain jar_head
+    local ping ping_body chain verbose jar_head
     ping="$(curl -sS --noproxy '*' -o /dev/null -w '%{http_code}' -b "$_TB_JAR" "$_TB_URL/api/ping/" 2>&1 || echo '?')"
+    ping_body="$(curl -sS --noproxy '*' -b "$_TB_JAR" "$_TB_URL/api/ping/" 2>&1 | head -c 160 || true)"
+    verbose="$(curl -sS --noproxy '*' -o /dev/null -v -L -b "$_TB_JAR" -c "$_TB_JAR" -H 'Accept: text/html' "$_TB_URL/" 2>&1 | grep -iE '^[<>*]|set-cookie|location' | head -40 || true)"
     chain="$(curl -sS --noproxy '*' -o /dev/null -L -b "$_TB_JAR" -c "$_TB_JAR" -H 'Accept: text/html' -w '%{num_redirects} 次：最后 %{url_effective}' "$_TB_URL/" 2>&1 || true)"
-    jar_head="$(head -c 300 "$_TB_JAR" 2>/dev/null | tr '\n' '|')"
-    echo "应用会话没建立（jar 里没有 csrftoken）：页面 HTTP $code，/api/ping/ 返回 $ping；重定向 $chain；jar 开头：${jar_head:-（空）}"
+    jar_head="$(grep -v '^#' "$_TB_JAR" 2>/dev/null | awk '{printf "%s ", $6}' || true)"
+    echo "应用会话没建立：页面 HTTP $code，ping $ping（$ping_body）；重定向 $chain；jar：${jar_head:-（空）}；响应头：
+$verbose"
     rm -f "$page" "$page.code"
     return 1
   }
