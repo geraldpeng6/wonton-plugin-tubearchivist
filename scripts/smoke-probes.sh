@@ -47,9 +47,20 @@ _tb_prep() {  # 备好 _TB_JAR/_TB_URL，建立核心会话和应用会话（jar
     { echo "核心登录请求失败"; return 1; }
   [[ "$code" == 2* || "$code" == 30* ]] || { echo "核心令牌登录不了（HTTP $code）"; return 1; }
   # 打开应用页面：网关代登录头在首个请求上让应用登录，响应种下 sessionid 和 csrftoken。
-  curl -sS --noproxy '*' -o /dev/null -L -b "$_TB_JAR" -c "$_TB_JAR" -H 'Accept: text/html' "$_TB_URL/" ||
-    { echo "打开应用页面失败"; return 1; }
-  grep -q csrftoken "$_TB_JAR" || { echo "应用会话没建立（jar 里没有 csrftoken）"; return 1; }
+  # 跟随完整交接链（核心登录 → /_wonton/session 交接 → 应用），保留现场：失败时打印响应码、
+  # 页面开头和 jar 里的 cookie 名，方便定位是会话、交接还是应用没接上。
+  local page diag
+  page="$(mktemp)"
+  curl -sS --noproxy '*' -o "$page" -w '%{http_code}' -L -b "$_TB_JAR" -c "$_TB_JAR" \
+    -H 'Accept: text/html' "$_TB_URL/" >"$page.code" 2>/dev/null || true
+  code="$(cat "$page.code" 2>/dev/null || echo '?')"
+  grep -q csrftoken "$_TB_JAR" || {
+    diag="$(head -c 200 "$page" 2>/dev/null | tr '\n' ' ')"
+    echo "应用会话没建立（jar 里没有 csrftoken）：最后响应 HTTP $code，页面开头：${diag:-（空）}；jar cookie：$(grep -vc '^#' "$_TB_JAR" 2>/dev/null) 行：$(awk '!/^#/ {printf "%s ", $6}' "$_TB_JAR" 2>/dev/null)"
+    rm -f "$page" "$page.code"
+    return 1
+  }
+  rm -f "$page" "$page.code"
 }
 
 _tb_csrf() { awk '$6 == "csrftoken" {print $7; exit}' "$_TB_JAR"; }
