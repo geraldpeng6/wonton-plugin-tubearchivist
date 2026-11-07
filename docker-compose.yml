@@ -1,78 +1,169 @@
-# 示例插件：nginx 显示一个网页，向登录的人问好。改成自己的应用见 https://github.com/geraldpeng6/wonton-docs/blob/main/develop.md#写插件。
+# TubeArchivist：YouTube 频道订阅、自动下载和本地存档，元数据可喂给 Jellyfin。
+# 上游单容器应用，外加它要求的 Elasticsearch（索引和全文搜索）和 Redis（任务队列），都在本插件里。
+#
+# 登录走网关代登录（sso: proxy）：TubeArchivist 认 Remote-User 请求头（TA_ENABLE_AUTH_PROXY，
+# Django 的 RemoteUserBackend 按头里的名字找账号），但应用没有"可信代理地址"配置，而出网插件
+# 必须只信核心（ADR-0023）。所以网关代带的不是用户名，而是核心生成的密钥（secrets.ta_user）：
+# 应用启动时以它为用户名建管理员，网关对登录用户的每个请求都带上同名头，打开网页就是管理员，
+# 没有第二个登录页。拿到这个值才能进应用，它只存在核心密钥库和容器环境里。
 services:
-  web:
-    # 镜像按摘要固定（多架构镜像写清单列表的摘要），标签只给人看。
-    image: nginx:1.31.7-alpine@sha256:892bb2152464f0c5d8972593a5f5afaf8054552580b699d95f8ff4af08c2d33d
+  app:
+    # 上游官方镜像，标签对上游 v0.6.0（license: GPL-3.0-only）。
+    image: bbilly1/tubearchivist:v0.6.0@sha256:0cbc18aa953c72ec7dfdd6f8fa7c2fe89b5d04489857d7baa354fecbd6181e69
+    # 上游支持以任意 uid 运行：下载的视频和缓存归用户，数据目录也按 PUID:PGID 交给它。
+    user: "${PUID}:${PGID}"
     environment:
-      # 网关代登录：SSI 回显的 Remote-User 只信核心带来的。官方镜像启动时对 templates 目录里的
-      # *.template 做 envsubst，把下面的地址换进 nginx 配置（见 web/default.conf.template）。
-      WONTON_CORE_ADDRESS: ${WONTON_CORE_ADDRESS}
-    # 包里的文件经 configs 交给容器（核心在启动前写进去），不能用卷挂载。
-    configs:
-      - source: site
-        target: /etc/nginx/templates/default.conf.template
-      - source: page
-        target: /usr/share/nginx/html/index.html
-      - source: tokens
-        target: /usr/share/nginx/html/tokens.css
+      # 上游拿它生成 ALLOWED_HOSTS 和 CSRF_TRUSTED_ORIGINS，要按浏览器看到的地址写；
+      # 再加上 127.0.0.1：核心安装时的网页探测和下面的健康检查都用它连，不给的话 Django 按
+      # DisallowedHost 回 400，健康检查永远过不了（上游 ta_host_parser 按空格拆多个地址）。
+      TA_HOST: "${WONTON_APP_URL} http://127.0.0.1:8000"
+      # 应用强制要求 TA_USERNAME/TA_PASSWORD 并在启动时用它建管理员账号；两个值都是核心
+      # 生成的密钥，不写死（见文件头：网页身份由代登录头决定，这对凭据不落人手）。
+      TA_USERNAME: ${WONTON_SECRET_TA_USER}
+      TA_PASSWORD: ${WONTON_SECRET_TA_PASSWORD}
+      TA_ENABLE_AUTH_PROXY: "true"
+      # TA_AUTH_PROXY_USERNAME_HEADER 是 Django 6 里的一个坑：TA 跑在 uvicorn/ASGI 上，
+      # 认头走 RemoteUserMiddleware.aprocess_request，它读 META["HTTP_" + 自身值]（同步
+      # 路径读 META[自身值]，两条路径约定不同，见 django/contrib/auth/middleware.py 6.0.9）。
+      # 网关注入的 Remote-User 头在 META 里是 HTTP_REMOTE_USER，所以这里必须写 REMOTE_USER；
+      # 写上游默认的 HTTP_REMOTE_USER 会变成找 HTTP_HTTP_REMOTE_USER，静默不认证。
+      TA_AUTH_PROXY_USERNAME_HEADER: REMOTE_USER
+      ELASTIC_PASSWORD: ${WONTON_SECRET_ELASTIC_PASSWORD}
+      ES_URL: http://es:9200
+      REDIS_CON: redis://:${WONTON_SECRET_REDIS_PASSWORD}@redis:6379
+      TZ: ${TZ}
+    volumes:
+      # 下载的视频（/youtube）和缩略图、下载队列缓存（/cache）放插件数据目录。
+      - ${WONTON_APP_DATA}/media:/youtube
+      - ${WONTON_APP_DATA}/cache:/cache
+    depends_on:
+      es:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
     healthcheck:
-      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1/healthz"]
+      # 应用进程应答之外，同一网络里还要连得上 ES（yellow）和 Redis：三个都通才算健康。
+      # curl 都加 --noproxy：健康检查不走代理（规范），出网代理的变量不影响内部探测。
+      test:
+        - CMD-SHELL
+        - >-
+          curl --noproxy '*' -fsS http://127.0.0.1:8000/api/health/ >/dev/null
+          && curl --noproxy '*' -fsS -u "elastic:$$ELASTIC_PASSWORD" 'http://es:9200/_cluster/health?wait_for_status=yellow&timeout=10s' >/dev/null
+          && python3 -c "import redis, os; redis.from_url(os.environ['REDIS_CON']).ping()"
+      interval: 60s
+      timeout: 15s
+      retries: 5
+      # 首次启动要建索引、迁移数据，等上游自己的启动检查跑完。
+      start_period: 5m
+      start_interval: 15s
+
+  es:
+    # Elasticsearch 官方镜像（Elastic License 2.0）。上游自己的 bbilly1/tubearchivist-es 只有
+    # amd64，上游 docker-compose 注明 arm64 用官方 ES 9.5.5，这里两边都能跑。
+    image: docker.elastic.co/elasticsearch/elasticsearch:9.5.5@sha256:13b4a40bb095774f5fda635e45fd5677cc6a26565e42b24997b0c72b88e75984
+    environment:
+      # TubeArchivist 以 elastic 账号连进来，密码由核心生成保管，两边一致。
+      ELASTIC_PASSWORD: ${WONTON_SECRET_ELASTIC_PASSWORD}
+      discovery.type: single-node
+      xpack.security.enabled: "true"
+      ES_JAVA_OPTS: "-Xms1g -Xmx1g"
+      # TubeArchivist 启动时检查这个值，快照功能也要它（照上游 docker-compose）。
+      path.repo: /usr/share/elasticsearch/data/snapshot
+    volumes:
+      # 索引数据是派生数据；命名卷首次创建时沿用镜像里数据目录的属主，不依赖 PUID。
+      - es-data:/usr/share/elasticsearch/data
+    healthcheck:
+      # 健康检查不走代理，加 --noproxy。
+      test:
+        - CMD-SHELL
+        - >-
+          curl --noproxy '*' -fsS -u "elastic:$$ELASTIC_PASSWORD"
+          'http://127.0.0.1:9200/_cluster/health?wait_for_status=yellow&timeout=10s' >/dev/null
+      interval: 30s
+      timeout: 15s
+      retries: 10
+      start_period: 2m
+      start_interval: 5s
+
+  redis:
+    # 上游 docker-compose 用官方 Redis 镜像（AGPLv3、RSALv2 或 SSPLv1，见 NOTICE）。
+    image: redis:8.8.4@sha256:a008e2cb5579f3616b29bd9e9913a25f16ec09ae2f56ddab524664663b581228
+    # 任务队列带密码：出网插件的网络上宿主进程连得到，不设防的 Redis 能被写入任务。
+    command: ["redis-server", "--requirepass", "${WONTON_SECRET_REDIS_PASSWORD}"]
+    environment:
+      REDIS_PASSWORD: ${WONTON_SECRET_REDIS_PASSWORD}
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli --no-auth-warning -a \"$$REDIS_PASSWORD\" ping | grep -q PONG"]
       interval: 30s
       timeout: 5s
-      start_period: 30s
-      start_interval: 1s
+      retries: 10
+      start_period: 15s
+      start_interval: 2s
 
-configs:
-  site:
-    file: web/default.conf.template
-  page:
-    file: web/index.html
-  tokens:
-    file: web/tokens.css
+volumes:
+  es-data:
+  redis-data:
 
 x-wonton:
-  spec: "0.5"
-  # 换成你自己的：反向域名形式，装上以后不能改。
-  id: app.example.hello
-  version: 0.1.1
+  spec: "0.6"
+  id: com.tubearchivist.app
+  version: 0.1.0
   kind: app
-  title: { zh: 你好, en: Hello }
-  description: { zh: 向登录的人问好的示例网页, en: An example page that greets whoever is signed in }
+  title: { en: TubeArchivist }
+  description:
+    zh: 订阅 YouTube 频道自动下载存档，随时离线看
+    en: Subscribe to YouTube channels and archive them for offline viewing
   icon: icon.svg
   notices: [NOTICE]
-  screenshots: [screenshots/home.png]
-  author: { name: Example }
-  homepage: https://nginx.org
-  # 应用（这里是 nginx）的许可证；插件包自己的许可证写在仓库的 LICENSE 里。
-  license: BSD-2-Clause
+  screenshots: [screenshots/home.png, screenshots/channels.png, screenshots/downloads.png]
+  author: { name: geraldpeng6, url: https://github.com/geraldpeng6 }
+  homepage: https://www.tubearchivist.com
+  # 应用（TubeArchivist）的许可证；Elasticsearch 和 Redis 作为独立容器分发，许可见 NOTICE。
+  license: GPL-3.0-only
   tags:
-    zh: [工具]
-    en: [Tools]
+    zh: [视频, 下载]
+    en: [Video, Downloads]
   about:
     zh: |
-      一个示例网页：登录以后，页面会向你问好。新建插件时可以照着改。
+      订阅 YouTube 频道，新视频自动下载到家里的主机，网页里浏览、搜索、离线观看。
+
+      下载的视频和元数据存成本地文件，Jellyfin 等媒体库能直接读；下载质量和格式在设置里调。
+
+      首次启动要下载和索引，慢一些；下载视频需要能访问 YouTube 的网络。
     en: |
-      An example page: once you are signed in, the page says hello. Copy it as a starting point for a new plugin.
-  release_notes: { zh: 名字和说明更新。, en: Product name and description update. }
+      Subscribe to YouTube channels; new videos are downloaded to your server automatically, ready to browse, search and watch offline in the web page.
+
+      Videos and metadata are stored as local files that media servers like Jellyfin can pick up; download quality and format are set in the app's settings.
+
+      The first start downloads and indexes, which takes a while; downloading videos needs a network that can reach YouTube.
+  release_notes:
+    zh: 第一版：频道订阅、自动下载、全文搜索和 Jellyfin 元数据输出。
+    en: First release with channel subscriptions, automatic downloads, full-text search and Jellyfin metadata.
   webui:
-    service: web
-    port: 80
-    # 示例页回显网关注入的用户名，见 https://github.com/geraldpeng6/wonton-docs/blob/main/plugin-spec.md#网关代登录sso-proxy。
+    service: app
+    port: 8000
+    # 网关对登录用户代带 Remote-User 头，值是 secrets.ta_user（见文件头），打开就是管理员。
     sso: proxy
     proxy:
       headers:
-        Remote-User: "{user}"
-  # 能放到底栏的页面，见 https://github.com/geraldpeng6/wonton-docs/blob/main/plugin-spec.md#底栏页面tabs。放不放由用户决定。
-  tabs:
-    - id: home
-      title: { zh: 主页, en: Home }
-      icon: tabs/home.svg
-      icon_selected: tabs/home-fill.svg
-      path: /
-      # 这个页面没做适配，用默认的 inset：页面夹在 App 的栏中间，不会被挡。
-      # 想让内容从栏下滚过，写 layout: edge-to-edge，并用 --wonton-inset-* 留出栏的位置。
-  permissions: []
-  # 上游 nginx 官方镜像，amd64 和 arm64 都有；上游没写最低内存，按本机空闲实测取整（实测约 24M，取 64M）。
+        Remote-User: "{secret:ta_user}"
+  permissions:
+    # 下载视频、检查新版本都要出网。
+    - network.egress
+  secrets:
+    # 作为应用账号名的密钥：网关代登录头和 TA_USERNAME 用同一个值（见文件头）。
+    ta_user:
+      generate: { bytes: 24 }
+    ta_password:
+      generate: { bytes: 32 }
+    elastic_password:
+      generate: { bytes: 32 }
+    redis_password:
+      generate: { bytes: 32 }
+  # 镜像都支持 amd64 和 arm64。上游没写最低内存；ES 堆按上游 compose 配 1G，三容器空闲实测合计
+  # 约 250M（docker stats，建索引和下载时更高），含负载余量取 2G。
   requirements:
     arch: [amd64, arm64]
-    memory: 64M
+    memory: 2G

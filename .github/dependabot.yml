@@ -1,7 +1,12 @@
 # 上游镜像发新版时开 PR，标签和摘要一起改；PR 跑插件自己的检查。
+# ES 有自己的数据卷（es-data），跨大版本要重建索引或快照迁移，自动 PR 只跟小版本；
+# Redis 只当缓存用，数据丢了无所谓，跟着自动升级。
 version: 2
 updates:
   - package-ecosystem: docker-compose
     directory: /
     schedule:
       interval: daily
+    ignore:
+      - dependency-name: "docker.elastic.co/elasticsearch/elasticsearch"
+        update-types: ["version-update:semver-major"]
