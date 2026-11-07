@@ -132,12 +132,16 @@ x-wonton:
       下载的视频和元数据存成本地文件，Jellyfin 等媒体库能直接读；下载质量和格式在设置里调。
 
       首次启动要下载和索引，慢一些；下载视频需要能访问 YouTube 的网络。
+
+      设置页里显示的账号名是系统生成的内部凭据，只有能打开这个网页的人看得到。
     en: |
       Subscribe to YouTube channels; new videos are downloaded to your server automatically, ready to browse, search and watch offline in the web page.
 
       Videos and metadata are stored as local files that media servers like Jellyfin can pick up; download quality and format are set in the app's settings.
 
       The first start downloads and indexes, which takes a while; downloading videos needs a network that can reach YouTube.
+
+      The account name shown in the app's settings is a system-generated internal credential, visible only to people who can open this page.
   release_notes:
     zh: 第一版：频道订阅、自动下载、全文搜索和 Jellyfin 元数据输出。
     en: First release with channel subscriptions, automatic downloads, full-text search and Jellyfin metadata.
