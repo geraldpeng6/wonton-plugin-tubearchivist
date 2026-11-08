@@ -9,6 +9,14 @@
 
 web_assert() { grep -qi 'tubearchivist'; }   # 标准输入：应用真实页面（SPA 的 index.html）
 
+_tb_url() { printf '%s' "${SMOKE_WEB_URL%/}"; } # 套件给的 web_url 带尾斜杠，拼 API 路径前归一化
+
+_tb_get() { # <路径> [curl 参数…]：带应用会话走网关调 API；不归一化会把 //api/... 打到 SPA 兜底路由上
+  local path="$1"
+  shift
+  curl -sS --noproxy '*' --max-time 60 --fail-with-body -b "${SMOKE_JAR:-}" "$@" "$( _tb_url )$path"
+}
+
 _tb_prep() {  # 建立应用会话：jar 里要有应用种的 csrftoken
   [[ -n "${SMOKE_JAR:-}" ]] || { echo "SMOKE_JAR 没设置"; return 1; }
   local log
@@ -22,40 +30,36 @@ _tb_csrf() { awk '$6 == "csrftoken" {print $7; exit}' "$SMOKE_JAR"; }
 identity_check() {  # /api/user/account/ 只回给已登录会话：200 且是管理员说明代登录头生效
   _tb_prep || return 1
   local out
-  out="$(web_get /api/user/account/)" ||
+  out="$( _tb_get /api/user/account/ )" ||
     { echo "GET /api/user/account/ 失败：$out"; return 1; }
   jq -e '.is_staff == true and .is_superuser == true' <<<"$out" >/dev/null ||
     { echo "应用认出的账号不是管理员：$out"; return 1; }
 }
 
+# 数据：应用设置存在 Elasticsearch 里，升级、重装都保留。订阅页大小写成哨兵值 99（默认 67、
+# 范围 60-100），data_check 读回还是 99 就说明写进去的设置活着；标记值是确定性的，
+# 不依赖 SMOKE_STATE 的形态（套件马上要统一它）。
+TB_SENTINEL=99
+
 data_write() {
-  local state marker out tok
-  state="${SMOKE_STATE:-}"
-  [[ -n "$state" ]] || { echo "SMOKE_STATE 没设置"; return 1; }
+  local out tok
   _tb_prep || return 1
   tok="$(_tb_csrf)"
   [[ -n "$tok" ]] || { echo "会话里没有 csrftoken"; return 1; }
-  marker="$(( (RANDOM % 41) + 60 ))"   # 订阅页大小 60-100，探测值
-  out="$(web_get /api/appsettings/config/ \
+  out="$( _tb_get /api/appsettings/config/ \
     -H 'Content-Type: application/json' -H "X-CSRFToken: $tok" \
-    -X POST -d "{\"subscriptions\":{\"channel_size\":$marker}}")" ||
+    -X POST -d "{\"subscriptions\":{\"channel_size\":$TB_SENTINEL}}" )" ||
     { echo "POST /api/appsettings/config/ 失败：$out"; return 1; }
-  printf 'channel_size\t%s\n' "$marker" >"$state" || { echo "写不进状态文件 $state"; return 1; }
-  echo "已把订阅页大小写成 $marker（$state）"
+  echo "已把订阅页大小写成 $TB_SENTINEL"
 }
 
 data_check() {
-  local state line marker out got tok
-  state="${SMOKE_STATE:-}"
-  [[ -n "$state" ]] || { echo "SMOKE_STATE 没设置"; return 1; }
-  [[ -s "$state" ]] || { echo "状态文件 $state 不存在或为空：data_write 没跑过？"; return 1; }
-  line="$(head -n 1 "$state")"
-  marker="${line##*$'\t'}"
+  local out got tok
   _tb_prep || return 1
-  out="$(web_get /api/appsettings/config/)" ||
+  out="$( _tb_get /api/appsettings/config/ )" ||
     { echo "GET /api/appsettings/config/ 失败：$out"; return 1; }
   got="$(jq -r '.subscriptions.channel_size // empty' <<<"$out")"
-  [[ "$got" == "$marker" ]] ||
-    { echo "设置对不上：期望 channel_size=$marker，读到 ${got:-无}（$out）"; return 1; }
-  echo "订阅页大小还是 $marker，数据在"
+  [[ "$got" == "$TB_SENTINEL" ]] ||
+    { echo "设置对不上：期望 channel_size=$TB_SENTINEL，读到 ${got:-无}（$out）"; return 1; }
+  echo "订阅页大小还是 $TB_SENTINEL，数据在"
 }
