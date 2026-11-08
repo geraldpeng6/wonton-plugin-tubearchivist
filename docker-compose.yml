@@ -3,7 +3,7 @@
 #
 # 登录走网关代登录（sso: proxy）：TubeArchivist 认 Remote-User 请求头（TA_ENABLE_AUTH_PROXY，
 # Django 的 RemoteUserBackend 按头里的名字找账号），但应用没有"可信代理地址"配置，而出网插件
-# 必须只信核心（ADR-0023）。所以网关代带的不是用户名，而是核心生成的密钥（secrets.ta_user）：
+# 必须只信核心。所以网关代带的不是用户名，而是核心生成的密钥（secrets.ta_user）：
 # 应用启动时以它为用户名建管理员，网关对登录用户的每个请求都带上同名头，打开网页就是管理员，
 # 没有第二个登录页。拿到这个值才能进应用，它只存在核心密钥库和容器环境里。
 services:
