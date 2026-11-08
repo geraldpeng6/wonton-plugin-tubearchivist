@@ -60,7 +60,7 @@ services:
   es:
     # Elasticsearch 官方镜像（Elastic License 2.0）。上游自己的 bbilly1/tubearchivist-es 只有
     # amd64，上游 docker-compose 注明 arm64 用官方 ES 9.5.5，这里两边都能跑。
-    image: docker.elastic.co/elasticsearch/elasticsearch:9.5.5@sha256:13b4a40bb095774f5fda635e45fd5677cc6a26565e42b24997b0c72b88e75984
+    image: docker.elastic.co/elasticsearch/elasticsearch:9.5.6@sha256:79b4f1de4c15e6eca824723086a51e5934406d614d410cc11be77748cafac537
     environment:
       # TubeArchivist 以 elastic 账号连进来，密码由核心生成保管，两边一致。
       ELASTIC_PASSWORD: ${WONTON_SECRET_ELASTIC_PASSWORD}
@@ -87,7 +87,7 @@ services:
 
   redis:
     # 上游 docker-compose 用官方 Redis 镜像（AGPLv3、RSALv2 或 SSPLv1，见 NOTICE）。
-    image: redis:8.8.4@sha256:a008e2cb5579f3616b29bd9e9913a25f16ec09ae2f56ddab524664663b581228
+    image: redis:8.10.3@sha256:1f88291b4c57bdf249f02eb085a8669889b2d2954e91d4de5118a5da6b78dd53
     # 任务队列带密码：出网插件的网络上宿主进程连得到，不设防的 Redis 能被写入任务。
     command: ["redis-server", "--requirepass", "${WONTON_SECRET_REDIS_PASSWORD}"]
     environment:
@@ -109,7 +109,7 @@ volumes:
 x-wonton:
   spec: "0.6"
   id: com.tubearchivist.app
-  version: 0.1.0
+  version: 0.1.1
   kind: app
   title: { en: TubeArchivist }
   description:
@@ -143,8 +143,8 @@ x-wonton:
 
       The account name shown in the app's settings is a system-generated internal credential, visible only to people who can open this page.
   release_notes:
-    zh: 第一版：频道订阅、自动下载、全文搜索和 Jellyfin 元数据输出。
-    en: First release with channel subscriptions, automatic downloads, full-text search and Jellyfin metadata.
+    zh: 缓存和索引的辅助镜像升级：Redis 8.10.3、Elasticsearch 9.5.6。
+    en: "Helper images upgraded: Redis 8.10.3 for cache and Elasticsearch 9.5.6 for the index."
   webui:
     service: app
     port: 8000
