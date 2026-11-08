@@ -10,12 +10,13 @@
 #
 # 会话由套件助手建立：dweb --sso 走完整交接链（核心令牌登录 → 网关自动表单 → 应用），
 # jar 里带上 wonton_app 和应用种的 sessionid、csrftoken（Django SessionAuthentication
-# 的写请求要 CSRF）。状态文件自管（套件的 SMOKE_STATE 是目录），放探针脚本旁边。
+# 的写请求要 CSRF）。数据标记存套件的 SMOKE_STATE（新套件是文件；老套件没有时退回探针
+# 脚本旁自管的一份）。
 
 web_assert() { grep -qi 'tubearchivist'; }   # 标准输入：应用真实页面（SPA 的 index.html）
 
 _tb_dir() { printf '%s' "${BASH_SOURCE[0]%/*}"; }
-_tb_state() { printf '%s/.smoke-mail-state' "$(_tb_dir)"; }
+_tb_state() { printf '%s' "${SMOKE_STATE:-$(_tb_dir)/.smoke-mail-state}"; }
 
 _tb_prep() {  # 建立应用会话：jar 里要有应用种的 csrftoken
   [[ -n "${SMOKE_JAR:-}" ]] || { echo "SMOKE_JAR 没设置"; return 1; }
