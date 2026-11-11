@@ -168,7 +168,6 @@ data_check() {
   jq -e '.success == true' <<<"$out" >/dev/null ||
     { echo "内部地址测试信没发出去：$out"; return 1; }
   echo "内部地址测试信发送成功（$out）"
-  to_owner="$(jq -r '.update_subscribed.urls[0] | capture("to=(?<m>[^&]+)").m' <<<"$(_tb_notifs)")"
   _tb_mail_roundtrip "[TA] update_subscribed process ended with SUCCESS" || return 1
 
   # 外部地址：SMTP 阶段 550，应用报发送失败。
