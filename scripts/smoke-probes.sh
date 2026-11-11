@@ -18,12 +18,17 @@ web_assert() { grep -qi 'tubearchivist'; }   # 标准输入：应用真实页面
 _tb_dir() { printf '%s' "${BASH_SOURCE[0]%/*}"; }
 _tb_state() { printf '%s' "${SMOKE_STATE:-$(_tb_dir)/.smoke-mail-state}"; }
 
-_tb_prep() {  # 建立应用会话：jar 里要有应用种的 csrftoken
+_tb_prep() {  # 建立应用会话：jar 里要有应用种的 csrftoken。跑在套件 web_login 之前时 jar 是冷的；
+  # 应用刚装好时 SSO 页可能还是无表单的预热页（sso_form_login 对它当成功返回），重试到拿到会话。
   [[ -n "${SMOKE_JAR:-}" ]] || { echo "SMOKE_JAR 没设置"; return 1; }
   local log
-  log="$(dweb --sso / 2>&1 >/dev/null)" || { echo "走不通网关代登录链：${log:-（无输出）}"; return 1; }
-  grep -q csrftoken "$SMOKE_JAR" ||
-    { echo "应用会话没建立（jar 里没有 csrftoken，代登录头没生效？）"; return 1; }
+  for _ in 1 2 3 4 5 6; do
+    log="$(dweb --sso / 2>&1 >/dev/null)" || { echo "走不通网关代登录链：${log:-（无输出）}"; return 1; }
+    grep -q csrftoken "$SMOKE_JAR" 2>/dev/null && return 0
+    sleep 5
+  done
+  echo "应用会话没建立（jar 里没有 csrftoken，代登录头没生效？最后一步输出：${log:-无}）"
+  return 1
 }
 
 _tb_csrf() { awk '$6 == "csrftoken" {print $7; exit}' "$SMOKE_JAR"; }
