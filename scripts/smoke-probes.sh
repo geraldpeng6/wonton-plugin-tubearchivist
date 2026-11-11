@@ -19,7 +19,8 @@ _tb_dir() { printf '%s' "${BASH_SOURCE[0]%/*}"; }
 _tb_state() { printf '%s' "${SMOKE_STATE:-$(_tb_dir)/.smoke-mail-state}"; }
 
 _tb_prep() {  # 建立应用会话：jar 里要有应用种的 csrftoken。跑在套件 web_login 之前时 jar 是冷的；
-  # 应用刚装好时 SSO 页可能还是无表单的预热页（sso_form_login 对它当成功返回），重试到拿到会话。
+  # 应用刚装好时 SSO 页可能还是无表单的预热页（sso_form_login 对它当成功返回），重试到拿到会话；
+  # 还不行就走应用自己的账号登录（老 tag 没有代登录，账号密码是核心注入的密钥），网页身份两段并存。
   [[ -n "${SMOKE_JAR:-}" ]] || { echo "SMOKE_JAR 没设置"; return 1; }
   local log
   for _ in 1 2 3 4 5 6; do
@@ -27,7 +28,21 @@ _tb_prep() {  # 建立应用会话：jar 里要有应用种的 csrftoken。跑�
     grep -q csrftoken "$SMOKE_JAR" 2>/dev/null && return 0
     sleep 5
   done
-  echo "应用会话没建立（jar 里没有 csrftoken，代登录头没生效？最后一步输出：${log:-无}）"
+  local container up url
+  container="wonton-${SMOKE_INSTANCE:?}--com-tubearchivist-app--app"
+  up="$(docker exec "$container" printenv TA_USERNAME TA_PASSWORD 2>/dev/null)" ||
+    { echo "容器里没有 TA_USERNAME/TA_PASSWORD，走不了应用原生登录"; return 1; }
+  probes_web_url >/dev/null 2>&1 || { echo "拿不到应用网页地址"; return 1; }
+  url="$(curl_t 30 "$SMOKE_WEB_ORIGIN/api/user/login/" --noproxy '*' -b "$SMOKE_JAR" -c "$SMOKE_JAR" \
+    -H 'Content-Type: application/json' \
+    -d "$(jq -cn --arg u "$(sed -n 1p <<<"$up")" --arg p "$(sed -n 2p <<<"$up")" \
+      '{username:$u,password:$p,remember_me:true}')" -w '%{http_code}' -o /dev/null)" ||
+    { echo "应用原生登录请求失败"; return 1; }
+  [[ "$url" == 204 || "$url" == 200 ]] || { echo "应用原生登录被拒（HTTP $url）"; return 1; }
+  curl_t 30 "$SMOKE_WEB_ORIGIN/" --noproxy '*' -o /dev/null -b "$SMOKE_JAR" -c "$SMOKE_JAR" -H 'Accept: text/html' ||
+    { echo "登录后拿不到页面"; return 1; }
+  grep -q csrftoken "$SMOKE_JAR" 2>/dev/null && return 0
+  echo "应用会话没建立（SSO 和应用原生登录都没拿到 csrftoken；最后一步输出：${log:-无}）"
   return 1
 }
 
@@ -85,10 +100,12 @@ _tb_mail_in_mailpit() { # <收件人>：TubeArchivist 发的、还没被核心�
 wonton_chat_events() { # <条数>：核心投递事件的房间最近消息。核心实测亚秒取走信件（投完即删），
   # 在 Mailpit 里几乎抓不到中间态，投进主人 Wonton 私聊的房间事件才是权威证据。
   local mu room adm
-  mu="$(docker exec "$(core_container)" printenv WONTON_MATRIX_URL)"
-  room="$(docker exec "$(core_container)" sh -c 'cat "$WONTON_DATA_DIR/core/matrix-notice-room"')" ||
-    { echo "读不到通知房间 id"; return 1; }
-  adm="$(docker exec "$(core_container)" sh -c 'cat "$WONTON_DATA_DIR/core/matrix-admin-token"')" ||
+  mu="$(docker exec "$(core_container)" printenv WONTON_MATRIX_URL)" || { echo "读不到 Matrix 地址"; return 1; }
+  # 通知房间是第一封信投递时才建的：一封信都还没投过时读不到文件，按 0 条投递算
+  # （_delivered_after 的轮询会等它出现），不当错误。
+  room="$(docker exec "$(core_container)" sh -c 'cat "$WONTON_DATA_DIR/core/matrix-notice-room"' 2>/dev/null)" ||
+    { echo '{"chunk":[]}'; return 0; }
+  adm="$(docker exec "$(core_container)" sh -c 'cat "$WONTON_DATA_DIR/core/matrix-admin-token"' 2>/dev/null)" ||
     { echo "读不到 Matrix 管理令牌"; return 1; }
   docker run --rm --network "container:$(core_container)" curlimages/curl:8.23.0 --noproxy '*' -s \
     -H "Authorization: Bearer $adm" "$mu/_matrix/client/v3/rooms/$room/messages?limit=$1&dir=b"
