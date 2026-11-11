@@ -28,7 +28,7 @@ _tb_prep() {  # 建立应用会话：jar 里要有应用种的 csrftoken。跑�
     grep -q csrftoken "$SMOKE_JAR" 2>/dev/null && return 0
     sleep 5
   done
-  local container up url inst
+  local container up url inst port
   inst="${SMOKE_INSTANCE:-}"
   if [[ -z "$inst" && -n "${SMOKE_BASE:-}" ]]; then
     inst="${SMOKE_BASE#http://}"; inst="${inst%%.*}"
@@ -36,7 +36,15 @@ _tb_prep() {  # 建立应用会话：jar 里要有应用种的 csrftoken。跑�
   container="wonton-${inst}--com-tubearchivist-app--app"
   up="$(docker exec "$container" printenv TA_USERNAME TA_PASSWORD 2>/dev/null)" ||
     { echo "容器里没有 TA_USERNAME/TA_PASSWORD，走不了应用原生登录"; return 1; }
-  probes_web_url >/dev/null 2>&1 || { echo "拿不到应用网页地址"; return 1; }
+  # 应用网页地址不查运行中的 API（装 tag 阶段核心正忙）：按套件自己的约定拼
+  # http://<slug 连字符形>.<实例域名>:<端口>，端口和域名都在状态目录 .env 里。
+  local dport
+  port="$(probes_setting WONTON_PORT)"
+  dport="$(probes_setting WONTON_BASE_DOMAIN)"
+  [[ -n "$dport" ]] || dport="$(probes_setting WONTON_DEV_DOMAIN)"
+  [[ -n "$dport" ]] || dport="${inst}.wonton.localhost"
+  SMOKE_WEB_ORIGIN="http://com-tubearchivist-app.${dport}:${port}"
+  export SMOKE_WEB_ORIGIN
   url="$(curl_t 30 "$SMOKE_WEB_ORIGIN/api/user/login/" --noproxy '*' -b "$SMOKE_JAR" -c "$SMOKE_JAR" \
     -H 'Content-Type: application/json' \
     -d "$(jq -cn --arg u "$(sed -n 1p <<<"$up")" --arg p "$(sed -n 2p <<<"$up")" \
