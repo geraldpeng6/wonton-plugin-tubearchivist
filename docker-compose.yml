@@ -141,10 +141,10 @@ x-wonton:
   id: com.tubearchivist.app
   version: 0.2.0
   kind: app
-  title: { en: TubeArchivist }
+  title: { zh: YouTube 频道存档（TubeArchivist）, en: YouTube Channel Archive (TubeArchivist) }
   description:
-    zh: 订阅 YouTube 频道自动下载存档，随时离线看
-    en: Subscribe to YouTube channels and archive them for offline viewing
+    zh: 订阅 YouTube 频道后，新视频自动下载到家里，随时离线看，原视频下架也不怕；家庭影院（Jellyfin）也能读到这些视频。适合追频道、想长期留档的人。
+    en: "Subscribe to YouTube channels and new videos download to your home server automatically, ready to watch offline even if the originals disappear; Jellyfin can pick them up too. For following channels and keeping an archive."
   icon: icon.svg
   notices: [NOTICE]
   screenshots: [screenshots/home.png, screenshots/channels.png, screenshots/downloads.png]
