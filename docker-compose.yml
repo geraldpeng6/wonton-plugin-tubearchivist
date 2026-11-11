@@ -6,6 +6,10 @@
 # 必须只信核心。所以网关代带的不是用户名，而是核心生成的密钥（secrets.ta_user）：
 # 应用启动时以它为用户名建管理员，网关对登录用户的每个请求都带上同名头，打开网页就是管理员，
 # 没有第二个登录页。拿到这个值才能进应用，它只存在核心密钥库和容器环境里。
+#
+# 任务结束的通知邮件走应用的 Apprise 通知（存 ES 的 ta_config），没有环境变量可注入，由
+# notify-init 服务在应用健康后经应用自己的 API 配好，发进收件人的 Wonton 私聊（notify 权限，
+# WONTON_SMTP_*）。
 services:
   app:
     # 上游官方镜像，标签对上游 v0.6.0（license: GPL-3.0-only）。
@@ -14,9 +18,10 @@ services:
     user: "${PUID}:${PGID}"
     environment:
       # 上游拿它生成 ALLOWED_HOSTS 和 CSRF_TRUSTED_ORIGINS，要按浏览器看到的地址写；
-      # 再加上 127.0.0.1：核心安装时的网页探测和下面的健康检查都用它连，不给的话 Django 按
-      # DisallowedHost 回 400，健康检查永远过不了（上游 ta_host_parser 按空格拆多个地址）。
-      TA_HOST: "${WONTON_APP_URL} http://127.0.0.1:8000"
+      # 再加上 127.0.0.1：核心安装时的网页探测和下面的健康检查都用它连；加上 http://app:8000：
+      # notify-init 从插件网络里直接调应用 API，Host 是 app:8000，不给的话 Django 按
+      # DisallowedHost 回 400（上游 ta_host_parser 按空格拆多个地址）。
+      TA_HOST: "${WONTON_APP_URL} http://app:8000 http://127.0.0.1:8000"
       # 应用强制要求 TA_USERNAME/TA_PASSWORD 并在启动时用它建管理员账号；两个值都是核心
       # 生成的密钥，不写死（见文件头：网页身份由代登录头决定，这对凭据不落人手）。
       TA_USERNAME: ${WONTON_SECRET_TA_USER}
@@ -56,6 +61,27 @@ services:
       # 首次启动要建索引、迁移数据，等上游自己的启动检查跑完。
       start_period: 5m
       start_interval: 15s
+
+  # 应用健康后跑一次：经应用自己的 API 给四个任务配上发到主人 Wonton 私聊的邮件通知
+  # （见 config/notify-init.py 的文件头）。通知配置存在 ES 的 ta_config 里，应用没有对应
+  # 的环境变量，只能走 API；只在配置整体为空时写入，用户在应用里改过的不动。
+  notify-init:
+    image: bbilly1/tubearchivist:v0.6.0@sha256:0cbc18aa953c72ec7dfdd6f8fa7c2fe89b5d04489857d7baa354fecbd6181e69
+    command: ["python3", "/seed/notify-init.py"]
+    environment:
+      # Remote-User 的值是核心生成保管的密钥，只走插件网络内部。
+      WONTON_SECRET_TA_USER: ${WONTON_SECRET_TA_USER}
+      WONTON_SMTP_HOST: ${WONTON_SMTP_HOST}
+      WONTON_SMTP_PORT: ${WONTON_SMTP_PORT}
+      WONTON_MAIL_FROM: ${WONTON_MAIL_FROM}
+      WONTON_OWNER_EMAIL: ${WONTON_OWNER_EMAIL}
+    configs:
+      - source: notify_init
+        target: /seed/notify-init.py
+    depends_on:
+      app:
+        condition: service_healthy
+    restart: "no"
 
   es:
     # Elasticsearch 官方镜像（Elastic License 2.0）。上游自己的 bbilly1/tubearchivist-es 只有
@@ -106,10 +132,14 @@ volumes:
   es-data:
   redis-data:
 
+configs:
+  notify_init:
+    file: config/notify-init.py
+
 x-wonton:
-  spec: "0.6"
+  spec: "0.11"
   id: com.tubearchivist.app
-  version: 0.1.1
+  version: 0.2.0
   kind: app
   title: { en: TubeArchivist }
   description:
@@ -131,6 +161,8 @@ x-wonton:
 
       下载的视频和元数据存成本地文件，Jellyfin 等媒体库能直接读；下载质量和格式在设置里调。
 
+      下载、订阅更新和重建索引完成时的邮件通知进你的 Wonton 私聊，应用设置里可调整；发到外部邮箱的通知会被拒收。
+
       首次启动要下载和索引，慢一些；下载视频需要能访问 YouTube 的网络。
 
       设置页里显示的账号名是系统生成的内部凭据，只有能打开这个网页的人看得到。
@@ -139,12 +171,14 @@ x-wonton:
 
       Videos and metadata are stored as local files that media servers like Jellyfin can pick up; download quality and format are set in the app's settings.
 
+      Email notifications when downloads, subscription updates and reindexing finish land in your Wonton chat and can be adjusted in the app's settings; notifications to external addresses are rejected.
+
       The first start downloads and indexes, which takes a while; downloading videos needs a network that can reach YouTube.
 
       The account name shown in the app's settings is a system-generated internal credential, visible only to people who can open this page.
   release_notes:
-    zh: 缓存和索引的辅助镜像升级：Redis 8.10.3、Elasticsearch 9.5.6。
-    en: "Helper images upgraded: Redis 8.10.3 for cache and Elasticsearch 9.5.6 for the index."
+    zh: 任务结束的邮件通知接上云吞的内部邮箱：下载、订阅更新和重建索引完成后通知到你的 Wonton 私聊，应用设置里可调整。
+    en: "Task-end email notifications now use Wonton's internal mailbox: downloads, subscription updates and reindexing report to your Wonton chat, adjustable in the app's settings."
   webui:
     service: app
     port: 8000
@@ -156,6 +190,10 @@ x-wonton:
   permissions:
     # 下载视频、检查新版本都要出网。
     - network.egress
+    # 任务结束的邮件通知发到主人的 Wonton 私聊（notify-init 配进应用）：收件人是主人的
+    # 内部邮箱，要 owner.identity 拿 WONTON_OWNER_EMAIL，notify 拿 SMTP 三件套。
+    - owner.identity
+    - notify
   secrets:
     # 作为应用账号名的密钥：网关代登录头和 TA_USERNAME 用同一个值（见文件头）。
     ta_user:
