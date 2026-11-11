@@ -28,8 +28,12 @@ _tb_prep() {  # 建立应用会话：jar 里要有应用种的 csrftoken。跑�
     grep -q csrftoken "$SMOKE_JAR" 2>/dev/null && return 0
     sleep 5
   done
-  local container up url
-  container="wonton-${SMOKE_INSTANCE:?}--com-tubearchivist-app--app"
+  local container up url inst
+  inst="${SMOKE_INSTANCE:-}"
+  if [[ -z "$inst" && -n "${SMOKE_BASE:-}" ]]; then
+    inst="${SMOKE_BASE#http://}"; inst="${inst%%.*}"
+  fi
+  container="wonton-${inst}--com-tubearchivist-app--app"
   up="$(docker exec "$container" printenv TA_USERNAME TA_PASSWORD 2>/dev/null)" ||
     { echo "容器里没有 TA_USERNAME/TA_PASSWORD，走不了应用原生登录"; return 1; }
   probes_web_url >/dev/null 2>&1 || { echo "拿不到应用网页地址"; return 1; }
