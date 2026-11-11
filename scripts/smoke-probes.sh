@@ -28,7 +28,7 @@ _tb_prep() {  # 建立应用会话：jar 里要有应用种的 csrftoken。跑�
     grep -q csrftoken "$SMOKE_JAR" 2>/dev/null && return 0
     sleep 5
   done
-  local container up url inst port
+  local container up url inst
   inst="${SMOKE_INSTANCE:-}"
   if [[ -z "$inst" && -n "${SMOKE_BASE:-}" ]]; then
     inst="${SMOKE_BASE#http://}"; inst="${inst%%.*}"
@@ -36,22 +36,19 @@ _tb_prep() {  # 建立应用会话：jar 里要有应用种的 csrftoken。跑�
   container="wonton-${inst}--com-tubearchivist-app--app"
   up="$(docker exec "$container" printenv TA_USERNAME TA_PASSWORD 2>/dev/null)" ||
     { echo "容器里没有 TA_USERNAME/TA_PASSWORD，走不了应用原生登录"; return 1; }
-  # 应用网页地址不查运行中的 API（装 tag 阶段核心正忙）：按套件自己的约定拼
-  # http://<slug 连字符形>.<实例域名>:<端口>，端口和域名都在状态目录 .env 里。
-  local dport
-  port="$(probes_setting WONTON_PORT)"
-  dport="$(probes_setting WONTON_BASE_DOMAIN)"
-  [[ -n "$dport" ]] || dport="$(probes_setting WONTON_DEV_DOMAIN)"
-  [[ -n "$dport" ]] || dport="${inst}.wonton.localhost"
-  SMOKE_WEB_ORIGIN="http://com-tubearchivist-app.${dport}:${port}"
+  # 应用网页地址从 SMOKE_BASE（核心地址）直接推：同一域名和端口，主机名换成
+  # com-tubearchivist-app（套件在装 tag 阶段还没有 web_url 可查，核心也正忙）。
+  [[ -n "${SMOKE_BASE:-}" ]] || { echo "SMOKE_BASE 没设置"; return 1; }
+  SMOKE_WEB_ORIGIN="http://com-tubearchivist-app.${SMOKE_BASE#http://}"
   export SMOKE_WEB_ORIGIN
-  url="$(curl_t 30 "$SMOKE_WEB_ORIGIN/api/user/login/" --noproxy '*' -b "$SMOKE_JAR" -c "$SMOKE_JAR" \
-    -H 'Content-Type: application/json' \
+  url="$(curl -sS --noproxy '*' --max-time 30 "$SMOKE_WEB_ORIGIN/api/user/login/" \
+    -b "$SMOKE_JAR" -c "$SMOKE_JAR" -H 'Content-Type: application/json' \
     -d "$(jq -cn --arg u "$(sed -n 1p <<<"$up")" --arg p "$(sed -n 2p <<<"$up")" \
-      '{username:$u,password:$p,remember_me:true}')" -w '%{http_code}' -o /dev/null)" ||
+      '{username:$u,password:$p,remember_me:true}')" -w '%{http_code}' -o /dev/null 2>/dev/null)" ||
     { echo "应用原生登录请求失败"; return 1; }
   [[ "$url" == 204 || "$url" == 200 ]] || { echo "应用原生登录被拒（HTTP $url）"; return 1; }
-  curl_t 30 "$SMOKE_WEB_ORIGIN/" --noproxy '*' -o /dev/null -b "$SMOKE_JAR" -c "$SMOKE_JAR" -H 'Accept: text/html' ||
+  curl -sS --noproxy '*' --max-time 30 "$SMOKE_WEB_ORIGIN/" -o /dev/null \
+    -b "$SMOKE_JAR" -c "$SMOKE_JAR" -H 'Accept: text/html' 2>/dev/null ||
     { echo "登录后拿不到页面"; return 1; }
   grep -q csrftoken "$SMOKE_JAR" 2>/dev/null && return 0
   echo "应用会话没建立（SSO 和应用原生登录都没拿到 csrftoken；最后一步输出：${log:-无}）"
