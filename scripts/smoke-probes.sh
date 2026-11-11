@@ -49,7 +49,7 @@ data_write() {
   tok="$(_tb_csrf)"
   [[ -n "$tok" ]] || { echo "会话里没有 csrftoken"; return 1; }
   marker="$(( (RANDOM % 41) + 60 ))"   # 订阅页大小 60-100，探测值
-  out="$(_tb_post /api/appsettings/config/ "{\"subscriptions\":{\"channel_size\":$marker}\"}")" ||
+  out="$(_tb_post /api/appsettings/config/ "{\"subscriptions\":{\"channel_size\":$marker}}")" ||
     { echo "POST /api/appsettings/config/ 失败：$out"; return 1; }
   printf 'channel_size\t%s\n' "$marker" >"$(_tb_state)" || { echo "写不进状态文件 $(_tb_state)"; return 1; }
   echo "已把订阅页大小写成 $marker（$(_tb_state)）"
@@ -77,20 +77,37 @@ _tb_mail_in_mailpit() { # <收件人>：TubeArchivist 发的、还没被核心�
     [.messages[] | select((.From.Address == $f) and ([.To[].Address] | index($t)))] | length'
 }
 
-_tb_mail_roundtrip() { # <收件人> <应用已报发送成功>：等信进 Mailpit，再等核心投走
-  local recipient="$1" out seen=0
+wonton_chat_events() { # <条数>：核心投递事件的房间最近消息。核心实测亚秒取走信件（投完即删），
+  # 在 Mailpit 里几乎抓不到中间态，投进主人 Wonton 私聊的房间事件才是权威证据。
+  local mu room adm
+  mu="$(docker exec "$(core_container)" printenv WONTON_MATRIX_URL)"
+  room="$(docker exec "$(core_container)" sh -c 'cat "$WONTON_DATA_DIR/core/matrix-notice-room"')" ||
+    { echo "读不到通知房间 id"; return 1; }
+  adm="$(docker exec "$(core_container)" sh -c 'cat "$WONTON_DATA_DIR/core/matrix-admin-token"')" ||
+    { echo "读不到 Matrix 管理令牌"; return 1; }
+  docker run --rm --network "container:$(core_container)" curlimages/curl:8.23.0 --noproxy '*' -s \
+    -H "Authorization: Bearer $adm" "$mu/_matrix/client/v3/rooms/$room/messages?limit=$1&dir=b"
+}
+
+_tb_mail_in_wonton_chat() { # <主题>：本插件已投进主人 Wonton 私聊的邮件事件数
+  wonton_chat_events 30 | jq -r --arg s "$1" '
+    [.chunk[] | select(.content["app.wonton.plugin_mail"].subject == $s)] | length'
+}
+
+_tb_mail_roundtrip() { # <主题>：等 TA 的测试信（主题固定带任务名）投进主人私聊，再核对 Mailpit 没有滞留
+  local subj="$1" out seen=0
   for _ in {1..12}; do
     sleep 5
-    out="$(_tb_mail_in_mailpit "$recipient")" || { echo "$out"; return 1; }
+    out="$(_tb_mail_in_wonton_chat "$subj")" || { echo "$out"; return 1; }
     if [[ "$out" != 0 ]]; then seen=1; break; fi
   done
-  [[ "$seen" == 1 ]] || { echo "等了 1 分钟没看到信进 Mailpit（SMTP 链路没走通？）"; return 1; }
-  for _ in {1..24}; do
+  [[ "$seen" == 1 ]] || { echo "等了 1 分钟没看到信投进主人的 Wonton 私聊（投递失败？）"; return 1; }
+  for _ in {1..12}; do
     sleep 5
-    out="$(_tb_mail_in_mailpit "$recipient")" || { echo "$out"; return 1; }
-    [[ "$out" == 0 ]] && { echo "信已被核心投进收件人的 Wonton 私聊（Mailpit 里删了）"; return 0; }
+    out="$(_tb_mail_in_mailpit "owner@wonton.internal")" || { echo "$out"; return 1; }
+    [[ "$out" == 0 ]] && { echo "信已投进主人的 Wonton 私聊，Mailpit 没有滞留"; return 0; }
   done
-  echo "等了 2 分钟信还在 Mailpit，核心没取走（投递失败？）"
+  echo "信投进了私聊，但 Mailpit 里还有滞留（核心没删？）"
   return 1
 }
 
@@ -101,11 +118,15 @@ data_check() {
   line="$(head -n 1 "$state")"
   marker="${line##*$'\t'}"
   _tb_prep || return 1
-  out="$(_tb_notifs)" || { echo "GET /api/task/notification/ 失败：$out"; return 1; }
+  # 订阅页大小在应用配置里（/api/appsettings/config/）；四个任务的 Apprise 通知在
+  # /api/task/notification/，两个端点各回各的，别混读。
+  out="$(web_get /api/appsettings/config/)" ||
+    { echo "GET /api/appsettings/config/ 失败：$out"; return 1; }
   got="$(jq -r '.subscriptions.channel_size // empty' <<<"$out")"
   [[ "$got" == "$marker" ]] ||
     { echo "设置对不上：期望 channel_size=$marker，读到 ${got:-无}（$out）"; return 1; }
   echo "订阅页大小还是 $marker，数据在"
+  out="$(_tb_notifs)" || { echo "GET /api/task/notification/ 失败：$out"; return 1; }
 
   url="$(jq -r '.update_subscribed.urls[0] // empty' <<<"$out")"
   # 通知是 notify-init 写的（mailto 链接，见 config/notify-init.py）。第一遍 data_check 在"装 tag
@@ -143,7 +164,7 @@ data_check() {
     { echo "内部地址测试信没发出去：$out"; return 1; }
   echo "内部地址测试信发送成功（$out）"
   to_owner="$(jq -r '.update_subscribed.urls[0] | capture("to=(?<m>[^&]+)").m' <<<"$(_tb_notifs)")"
-  _tb_mail_roundtrip "$to_owner" || return 1
+  _tb_mail_roundtrip "[TA] update_subscribed process ended with SUCCESS" || return 1
 
   # 外部地址：SMTP 阶段 550，应用报发送失败。
   ext="${url%%&to=*}&to=someone@example.com"

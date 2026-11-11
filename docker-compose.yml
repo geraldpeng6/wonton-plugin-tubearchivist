@@ -18,9 +18,10 @@ services:
     user: "${PUID}:${PGID}"
     environment:
       # 上游拿它生成 ALLOWED_HOSTS 和 CSRF_TRUSTED_ORIGINS，要按浏览器看到的地址写；
-      # 再加上 127.0.0.1：核心安装时的网页探测和下面的健康检查都用它连，不给的话 Django 按
-      # DisallowedHost 回 400，健康检查永远过不了（上游 ta_host_parser 按空格拆多个地址）。
-      TA_HOST: "${WONTON_APP_URL} http://127.0.0.1:8000"
+      # 再加上 127.0.0.1：核心安装时的网页探测和下面的健康检查都用它连；加上 http://app:8000：
+      # notify-init 从插件网络里直接调应用 API，Host 是 app:8000，不给的话 Django 按
+      # DisallowedHost 回 400（上游 ta_host_parser 按空格拆多个地址）。
+      TA_HOST: "${WONTON_APP_URL} http://app:8000 http://127.0.0.1:8000"
       # 应用强制要求 TA_USERNAME/TA_PASSWORD 并在启动时用它建管理员账号；两个值都是核心
       # 生成的密钥，不写死（见文件头：网页身份由代登录头决定，这对凭据不落人手）。
       TA_USERNAME: ${WONTON_SECRET_TA_USER}
