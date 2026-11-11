@@ -22,11 +22,11 @@ _tb_prep() {  # 建立应用会话：jar 里要有应用种的 csrftoken
   [[ -n "${SMOKE_JAR:-}" ]] || { echo "SMOKE_JAR 没设置"; return 1; }
   local log
   log="$(dweb --sso / 2>&1 >/dev/null)" || { echo "走不通网关代登录链：${log:-（无输出）}"; return 1; }
-  grep -q csrftoken "$(_tb_jar)" ||
+  grep -q csrftoken "$SMOKE_JAR" ||
     { echo "应用会话没建立（jar 里没有 csrftoken，代登录头没生效？）"; return 1; }
 }
 
-_tb_csrf() { awk '$6 == "csrftoken" {print $7; exit}' "$(_tb_jar)"; }
+_tb_csrf() { awk '$6 == "csrftoken" {print $7; exit}' "$SMOKE_JAR"; }
 
 _tb_post() { # _tb_post <路径> <JSON>：带 CSRF 的应用写请求，输出响应体
   web_get "$1" -X POST -H 'Content-Type: application/json' -H "X-CSRFToken: $(_tb_csrf)" -d "$2"
@@ -55,8 +55,47 @@ data_write() {
   echo "已把订阅页大小写成 $marker（$(_tb_state)）"
 }
 
+# ---------- 邮件（notify）：应用测试接口真发信，核对核心投进私聊 ----------
+# 核心把信投进收件人的 Wonton 私聊后才从 Mailpit 删掉，投递失败会留着重试：信从 Mailpit 消失
+# 就是投走了。核心投递成功不打日志（只有失败才记 error），所以不用核心日志当证据。
+
+core_container() { # 核心容器：实例名拼（冒烟起的核心容器名固定这个形状）
+  printf '%s' "wonton-${SMOKE_INSTANCE:?}--core"
+}
+
+mailpit_messages() { # 经核心的网络栈读 Mailpit 收件箱 API（SMTP 25/HTTP 8025 都不发布到宿主）。
+  # API 要 Basic 认证（core:<密钥>，密钥在核心数据目录，核心的 mailbox 组件生成）。
+  local pwd
+  pwd="$(docker exec "$(core_container)" sh -c 'cat "$WONTON_DATA_DIR/core/mailpit/api-password"')" ||
+    { echo "读不到 Mailpit API 密钥"; return 1; }
+  docker run --rm --network "container:$(core_container)" curlimages/curl:8.23.0 --noproxy '*' -s \
+    -u "core:$pwd" "http://mailpit.wonton.internal:8025/api/v1/messages?limit=50"
+}
+
+_tb_mail_in_mailpit() { # <收件人>：TubeArchivist 发的、还没被核心取走的信（From 是注入的发件地址）
+  mailpit_messages | jq -r --arg f "com.tubearchivist.app@plugins.wonton.internal" --arg t "$1" '
+    [.messages[] | select((.From.Address == $f) and ([.To[].Address] | index($t)))] | length'
+}
+
+_tb_mail_roundtrip() { # <收件人> <应用已报发送成功>：等信进 Mailpit，再等核心投走
+  local recipient="$1" out seen=0
+  for _ in {1..12}; do
+    sleep 5
+    out="$(_tb_mail_in_mailpit "$recipient")" || { echo "$out"; return 1; }
+    if [[ "$out" != 0 ]]; then seen=1; break; fi
+  done
+  [[ "$seen" == 1 ]] || { echo "等了 1 分钟没看到信进 Mailpit（SMTP 链路没走通？）"; return 1; }
+  for _ in {1..24}; do
+    sleep 5
+    out="$(_tb_mail_in_mailpit "$recipient")" || { echo "$out"; return 1; }
+    [[ "$out" == 0 ]] && { echo "信已被核心投进收件人的 Wonton 私聊（Mailpit 里删了）"; return 0; }
+  done
+  echo "等了 2 分钟信还在 Mailpit，核心没取走（投递失败？）"
+  return 1
+}
+
 data_check() {
-  local state line marker out got url ext core_log task recorded
+  local state line marker out got url ext task recorded
   state="$(_tb_state)"
   [[ -s "$state" ]] || { echo "状态文件 $state 不存在或为空：data_write 没跑过？"; return 1; }
   line="$(head -n 1 "$state")"
@@ -103,11 +142,8 @@ data_check() {
   jq -e '.success == true' <<<"$out" >/dev/null ||
     { echo "内部地址测试信没发出去：$out"; return 1; }
   echo "内部地址测试信发送成功（$out）"
-
-  # 核心日志里的投递记录（docker 在冒烟机上可用，套件自己也用 docker；见 probes_env）。
-  core_log="$(docker logs "wonton-$SMOKE_INSTANCE--core" 2>&1 | grep -i mail | tail -3)"
-  [[ -n "$core_log" ]] || { echo "核心日志里没找到 mail 记录"; return 1; }
-  echo "核心日志：$core_log"
+  to_owner="$(jq -r '.update_subscribed.urls[0] | capture("to=(?<m>[^&]+)").m' <<<"$(_tb_notifs)")"
+  _tb_mail_roundtrip "$to_owner" || return 1
 
   # 外部地址：SMTP 阶段 550，应用报发送失败。
   ext="${url%%&to=*}&to=someone@example.com"
@@ -120,8 +156,9 @@ data_check() {
   got="$(jq -r '.check_reindex.urls[0] // empty' <<<"$out")"
   [[ -n "$got" ]] || { echo "check_reindex 没有通知可删：$out"; return 1; }
   out="$(web_get /api/task/notification/ -X DELETE -H 'Content-Type: application/json' \
-    -H "X-CSRFToken: $(_tb_csrf)" -d '{"task_name":"check_reindex","url":"'"$got"'"}')" &&
-    [[ -z "$out" ]] || { echo "删 check_reindex 通知失败：$out"; return 1; }
+    -H "X-CSRFToken: $(_tb_csrf)" -d '{"task_name":"check_reindex","url":"'"$got"'"}')" ||
+    { echo "删 check_reindex 通知失败：$out"; return 1; }
+  [[ -z "$out" ]] || { echo "删 check_reindex 通知失败：$out"; return 1; }
   echo "phase=checked" >>"$state"
   echo "url=$url" >>"$state"
   echo "已删 check_reindex 的通知，重装后核对剩下三条"
