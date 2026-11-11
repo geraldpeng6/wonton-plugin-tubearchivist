@@ -45,10 +45,10 @@ _tb_api() { # _tb_api <方法> <路径> [JSON]：容器里带 token 调应用 AP
 
 _tb_notifs() { _tb_api GET /api/task/notification/; }
 
-identity_check() {  # /api/user/account/ 只回给已登录会话：200 且是管理员说明代登录头生效
-  _tb_prep || return 1
+identity_check() {  # /api/user/account/ 只回给已认证请求：200 且是管理员说明代登录头的账号是管理员
+  # （token 端点本身是 AdminOnly，拿得到 token 就已经是管理员；网关代登录链由套件自己的身份项覆盖）
   local out
-  out="$(web_get /api/user/account/)" ||
+  out="$(_tb_api GET /api/user/account/)" ||
     { echo "GET /api/user/account/ 失败：$out"; return 1; }
   jq -e '.is_staff == true and .is_superuser == true' <<<"$out" >/dev/null ||
     { echo "应用认出的账号不是管理员：$out"; return 1; }
