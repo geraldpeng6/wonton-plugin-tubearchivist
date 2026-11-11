@@ -18,50 +18,32 @@ web_assert() { grep -qi 'tubearchivist'; }   # 标准输入：应用真实页面
 _tb_dir() { printf '%s' "${BASH_SOURCE[0]%/*}"; }
 _tb_state() { printf '%s' "${SMOKE_STATE:-$(_tb_dir)/.smoke-mail-state}"; }
 
-_tb_prep() {  # 建立应用会话：jar 里要有应用种的 csrftoken。跑在套件 web_login 之前时 jar 是冷的；
-  # 应用刚装好时 SSO 页可能还是无表单的预热页（sso_form_login 对它当成功返回），重试到拿到会话；
-  # 还不行就走应用自己的账号登录（老 tag 没有代登录，账号密码是核心注入的密钥），网页身份两段并存。
-  [[ -n "${SMOKE_JAR:-}" ]] || { echo "SMOKE_JAR 没设置"; return 1; }
-  local log
-  for _ in 1 2 3 4 5 6; do
-    log="$(dweb --sso / 2>&1 >/dev/null)" || { echo "走不通网关代登录链：${log:-（无输出）}"; return 1; }
-    grep -q csrftoken "$SMOKE_JAR" 2>/dev/null && return 0
-    sleep 5
-  done
-  local container up url inst
-  inst="${SMOKE_INSTANCE:-}"
-  if [[ -z "$inst" && -n "${SMOKE_BASE:-}" ]]; then
-    inst="${SMOKE_BASE#http://}"; inst="${inst%%.*}"
-  fi
-  container="wonton-${inst}--com-tubearchivist-app--app"
-  up="$(docker exec "$container" printenv TA_USERNAME TA_PASSWORD 2>/dev/null)" ||
-    { echo "容器里没有 TA_USERNAME/TA_PASSWORD，走不了应用原生登录"; return 1; }
-  # 应用网页地址从 SMOKE_BASE（核心地址）直接推：同一域名和端口，主机名换成
-  # com-tubearchivist-app（套件在装 tag 阶段还没有 web_url 可查，核心也正忙）。
-  [[ -n "${SMOKE_BASE:-}" ]] || { echo "SMOKE_BASE 没设置"; return 1; }
-  SMOKE_WEB_ORIGIN="http://com-tubearchivist-app.${SMOKE_BASE#http://}"
-  export SMOKE_WEB_ORIGIN
-  url="$(curl -sS --noproxy '*' --max-time 30 "$SMOKE_WEB_ORIGIN/api/user/login/" \
-    -b "$SMOKE_JAR" -c "$SMOKE_JAR" -H 'Content-Type: application/json' \
-    -d "$(jq -cn --arg u "$(sed -n 1p <<<"$up")" --arg p "$(sed -n 2p <<<"$up")" \
-      '{username:$u,password:$p,remember_me:true}')" -w '%{http_code}' -o /dev/null 2>/dev/null)" ||
-    { echo "应用原生登录请求失败"; return 1; }
-  [[ "$url" == 204 || "$url" == 200 ]] || { echo "应用原生登录被拒（HTTP $url）"; return 1; }
-  curl -sS --noproxy '*' --max-time 30 "$SMOKE_WEB_ORIGIN/" -o /dev/null \
-    -b "$SMOKE_JAR" -c "$SMOKE_JAR" -H 'Accept: text/html' 2>/dev/null ||
-    { echo "登录后拿不到页面"; return 1; }
-  grep -q csrftoken "$SMOKE_JAR" 2>/dev/null && return 0
-  echo "应用会话没建立（SSO 和应用原生登录都没拿到 csrftoken；最后一步输出：${log:-无}）"
-  return 1
+_tb_container() { # 应用容器名按核心规则拼；套件在装 tag 阶段还没导出 SMOKE_INSTANCE，从 SMOKE_BASE 推
+  local inst="${SMOKE_INSTANCE:-}"
+  [[ -n "$inst" ]] || { inst="${SMOKE_BASE#http://}"; inst="${inst%%.*}"; }
+  printf '%s' "wonton-${inst}--com-tubearchivist-app--app"
 }
 
-_tb_csrf() { awk '$6 == "csrftoken" {print $7; exit}' "$SMOKE_JAR"; }
-
-_tb_post() { # _tb_post <路径> <JSON>：带 CSRF 的应用写请求，输出响应体
-  web_get "$1" -X POST -H 'Content-Type: application/json' -H "X-CSRFToken: $(_tb_csrf)" -d "$2"
+_tb_token() { # 应用 API 的 DRF token：容器里带 Remote-User 头取（和 notify-init 同一认证方式，
+  # 见 config/notify-init.py）。老 tag 和新 tag 的代登录配置相同，这里不依赖任何会话和 CSRF。
+  local token
+  token="$(docker exec "$(_tb_container)" sh -c \
+    'curl -sS --noproxy "*" --max-time 30 -H "Remote-User: $TA_USERNAME" http://127.0.0.1:8000/api/appsettings/token/')" ||
+    { echo "取应用 API token 失败"; return 1; }
+  jq -er .token <<<"$token" 2>/dev/null || { echo "token 响应不对：$(head -c 160 <<<"$token")"; return 1; }
 }
 
-_tb_notifs() { web_get /api/task/notification/; }
+_tb_api() { # _tb_api <方法> <路径> [JSON]：容器里带 token 调应用 API，输出响应体
+  local method="$1" path="$2" body="${3:-}" token
+  token="$(_tb_token)" || return 1
+  local args=(curl -sS --noproxy '*' --max-time 30 -X "$method"
+              -H "Authorization: Token $token"
+              "http://127.0.0.1:8000$path")
+  [[ -n "$body" ]] && args+=(-H 'Content-Type: application/json' -d "$body")
+  docker exec "$(_tb_container)" "${args[@]}"
+}
+
+_tb_notifs() { _tb_api GET /api/task/notification/; }
 
 identity_check() {  # /api/user/account/ 只回给已登录会话：200 且是管理员说明代登录头生效
   _tb_prep || return 1
@@ -73,12 +55,9 @@ identity_check() {  # /api/user/account/ 只回给已登录会话：200 且是�
 }
 
 data_write() {
-  local marker out tok
-  _tb_prep || return 1
-  tok="$(_tb_csrf)"
-  [[ -n "$tok" ]] || { echo "会话里没有 csrftoken"; return 1; }
+  local marker out
   marker="$(( (RANDOM % 41) + 60 ))"   # 订阅页大小 60-100，探测值
-  out="$(_tb_post /api/appsettings/config/ "{\"subscriptions\":{\"channel_size\":$marker}}")" ||
+  out="$(_tb_api POST /api/appsettings/config/ "{\"subscriptions\":{\"channel_size\":$marker}}")" ||
     { echo "POST /api/appsettings/config/ 失败：$out"; return 1; }
   printf 'channel_size\t%s\n' "$marker" >"$(_tb_state)" || { echo "写不进状态文件 $(_tb_state)"; return 1; }
   echo "已把订阅页大小写成 $marker（$(_tb_state)）"
@@ -148,10 +127,9 @@ data_check() {
   [[ -s "$state" ]] || { echo "状态文件 $state 不存在或为空：data_write 没跑过？"; return 1; }
   line="$(head -n 1 "$state")"
   marker="${line##*$'\t'}"
-  _tb_prep || return 1
   # 订阅页大小在应用配置里（/api/appsettings/config/）；四个任务的 Apprise 通知在
   # /api/task/notification/，两个端点各回各的，别混读。
-  out="$(web_get /api/appsettings/config/)" ||
+  out="$(_tb_api GET /api/appsettings/config/)" ||
     { echo "GET /api/appsettings/config/ 失败：$out"; return 1; }
   got="$(jq -r '.subscriptions.channel_size // empty' <<<"$out")"
   [[ "$got" == "$marker" ]] ||
@@ -189,7 +167,7 @@ data_check() {
   echo "四个任务各一条相同的通知：$url"
 
   # 真实信件：收件人是主人的内部地址，经核心投进 Wonton 私聊；应用自己的测试接口报成败。
-  out="$(_tb_post /api/task/notification/test/ "{\"url\":\"$url\",\"task_name\":\"update_subscribed\"}")" ||
+  out="$(_tb_api POST /api/task/notification/test/ "{\"url\":\"$url\",\"task_name\":\"update_subscribed\"}")" ||
     { echo "内部地址测试信失败：$out"; return 1; }
   jq -e '.success == true' <<<"$out" >/dev/null ||
     { echo "内部地址测试信没发出去：$out"; return 1; }
@@ -198,7 +176,7 @@ data_check() {
 
   # 外部地址：SMTP 阶段 550，应用报发送失败。
   ext="${url%%&to=*}&to=someone@example.com"
-  out="$(_tb_post /api/task/notification/test/ "{\"url\":\"$ext\",\"task_name\":\"update_subscribed\"}")"
+  out="$(_tb_api POST /api/task/notification/test/ "{\"url\":\"$ext\",\"task_name\":\"update_subscribed\"}")"
   jq -e '.success == false' <<<"$out" >/dev/null ||
     { echo "外部地址没被拒（期望应用报失败）：$out"; return 1; }
   echo "外部地址被拒（$out）"
@@ -206,8 +184,7 @@ data_check() {
   out="$(_tb_notifs)" || { echo "读通知配置失败：$out"; return 1; }
   got="$(jq -r '.check_reindex.urls[0] // empty' <<<"$out")"
   [[ -n "$got" ]] || { echo "check_reindex 没有通知可删：$out"; return 1; }
-  out="$(web_get /api/task/notification/ -X DELETE -H 'Content-Type: application/json' \
-    -H "X-CSRFToken: $(_tb_csrf)" -d '{"task_name":"check_reindex","url":"'"$got"'"}')" ||
+  out="$(_tb_api DELETE /api/task/notification/ "{\"task_name\":\"check_reindex\",\"url\":\"$got\"}")" ||
     { echo "删 check_reindex 通知失败：$out"; return 1; }
   [[ -z "$out" ]] || { echo "删 check_reindex 通知失败：$out"; return 1; }
   echo "phase=checked" >>"$state"
